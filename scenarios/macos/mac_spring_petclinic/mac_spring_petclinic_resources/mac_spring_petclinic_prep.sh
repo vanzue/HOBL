@@ -83,12 +83,19 @@ log "-- Cloning repo"
 if [ -d "$BIN_DIR/spring-petclinic" ]; then
     log "✓ Spring Petclinic repo already exists"
     cd $BIN_DIR/spring-petclinic
-    git pull origin main 2>/dev/null || true
 else
     git clone https://github.com/spring-projects/spring-petclinic.git
     check_status "Git clone"
     cd $BIN_DIR/spring-petclinic
 fi
+
+revision=500158f732419217507c7656904b8e6aa1bcc0d6
+if ! git cat-file -e "$revision^{commit}" 2>/dev/null; then
+    git fetch origin "$revision"
+    check_status "Fetching pinned Petclinic revision"
+fi
+git checkout --detach "$revision"
+check_status "Checking out pinned Petclinic revision"
 
 # Install Brew (or verify it exists at default location)
 log "-- Installing Brew"
@@ -172,7 +179,8 @@ log "-- Warm Maven cache online"
 check_status "Maven dependency go-offline"
 
 log "-- Clean and verify build online"
-./mvnw -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic clean verify
+./mvnw -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic clean verify dependency:build-classpath \
+    "-Dmdep.outputFile=$BIN_DIR/mac_spring_petclinic_resources/trace-classpath.txt"
 check_status "Maven clean verify"
 
 # Final verification

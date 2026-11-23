@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/zsh
 # Copyright (c) Microsoft. All rights reserved.
 # Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
@@ -134,14 +134,44 @@ log "-- Cleaning previous build"
 # buffer and is lost on RPC timeout.
 MAVEN_CLEAN_LOG="$LOG_DIR/mac_spring_petclinic_maven_clean.log"
 log "-- Maven clean output: $MAVEN_CLEAN_LOG"
-./mvnw -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic clean > "$MAVEN_CLEAN_LOG" 2>&1
+./mvnw -o -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic clean > "$MAVEN_CLEAN_LOG" 2>&1
 check_status "Maven clean"
+
+tools="$BIN_DIR/petclinic_trace"
+round_id=$(uuidgen) || exit 1
+HOBL_TRACE_OUT="$LOG_DIR/spring_startup_trace-$round_id"
+mkdir "$HOBL_TRACE_OUT" || exit 1
+export HOBL_TRACE_OUT
+export HOBL_RUNNER_PID=$$
+log "Spring startup tracing enabled (Maven and Surefire): $HOBL_TRACE_OUT"
+./mvnw -o --version > "$HOBL_TRACE_OUT/maven-version.log" 2>&1
+check_status "Locating wrapper Maven distribution"
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" "$tools/PrepareOuter.java" "$tools" "$HOBL_TRACE_OUT/maven-version.log"
+check_status "Preparing outer command trace"
+outer="$HOBL_TRACE_OUT/outer"
+wrapper="$outer/mvnw"
+ext="-Dmaven.ext.class.path=$outer/probe.jar"
+# The scenario invokes this script with zsh. Take wall anchors in that
+# process, outside /usr/bin/time; real/user/sys are still BSD time's values.
+zmodload zsh/datetime || exit 1
+save_command_boundary() {
+    printf 'runner_pid\tstart_epoch_s\tend_epoch_s\texit_code\n%s\t%s\t%s\t%s\n' \
+        "$$" "$2" "$3" "$4" > "$outer/$1-command.tsv" || exit 1
+}
 
 log "-- spring_petclinic build started"
 
-MAVEN_BUILD_LOG="$LOG_DIR/mac_spring_petclinic_maven_build.log"
+MAVEN_BUILD_LOG="$HOBL_TRACE_OUT/maven-package.log"
 log "-- Maven build output: $MAVEN_BUILD_LOG"
-/usr/bin/time -p -o "$LOG_DIR/mac_spring_petclinic_build_time.log" ./mvnw -o -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic -DskipTests package > "$MAVEN_BUILD_LOG" 2>&1
+export HOBL_TRACE_PHASE=package
+start_wall=$EPOCHREALTIME
+/usr/bin/time -p -o "$LOG_DIR/mac_spring_petclinic_build_time.log" "$wrapper" -o "$ext" -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic -DskipTests package > "$MAVEN_BUILD_LOG" 2>&1
+build_exit=$?
+save_command_boundary package "$start_wall" "$EPOCHREALTIME" "$build_exit"
+cp "$LOG_DIR/mac_spring_petclinic_build_time.log" "$outer/package-time.log" || exit 1
+cp "$MAVEN_BUILD_LOG" "$LOG_DIR/mac_spring_petclinic_maven_build.log" || exit 1
+cp "$MAVEN_BUILD_LOG" "$HOBL_TRACE_OUT/maven-build.log" || exit 1
+[ "$build_exit" -eq 0 ]
 check_status "Maven package (build)"
 
 # Parse build phase timing
@@ -149,17 +179,51 @@ parse_time_output "$LOG_DIR/mac_spring_petclinic_build_time.log" "build"
 
 log "-- spring_petclinic build ended"
 
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" "$tools/PrepareProbe.java" "$tools" "$BIN_DIR/mac_spring_petclinic_resources/trace-classpath.txt"
+check_status "Preparing Surefire startup probe"
+
 log "-- spring_petclinic tests started"
 
-MAVEN_TEST_LOG="$LOG_DIR/mac_spring_petclinic_maven_test.log"
+MAVEN_TEST_LOG="$HOBL_TRACE_OUT/maven-test.log"
 log "-- Maven test output: $MAVEN_TEST_LOG"
-/usr/bin/time -p -o "$LOG_DIR/mac_spring_petclinic_test_time.log" ./mvnw -o -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic test > "$MAVEN_TEST_LOG" 2>&1
+export HOBL_TRACE_PHASE=test
+start_wall=$EPOCHREALTIME
+/usr/bin/time -p -o "$LOG_DIR/mac_spring_petclinic_test_time.log" "$wrapper" -o "$ext" -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic \
+    -Dmaven.surefire.debug=-javaagent:target/hobl-agent.jar -Djunit.jupiter.extensions.autodetection.enabled=true test > "$MAVEN_TEST_LOG" 2>&1
+test_exit=$?
+save_command_boundary test "$start_wall" "$EPOCHREALTIME" "$test_exit"
+cp "$LOG_DIR/mac_spring_petclinic_test_time.log" "$outer/test-time.log" || exit 1
+cp "$MAVEN_TEST_LOG" "$LOG_DIR/mac_spring_petclinic_maven_test.log" || exit 1
+[ "$test_exit" -eq 0 ]
 check_status "Maven test"
 
 # Parse test phase timing
 parse_time_output "$LOG_DIR/mac_spring_petclinic_test_time.log" "test"
 
 log "-- spring_petclinic tests completed"
+printf 'phase\tseconds\npackage\t%s\ntest\t%s\n' "$build_real" "$test_real" > "$HOBL_TRACE_OUT/phase-times.tsv" || exit 1
+log "phase-times.tsv: BSD time -p real seconds at its reported precision."
+cp target/jacoco.exec "$HOBL_TRACE_OUT/" || exit 1
+./mvnw -o -Dmaven.repo.local=$BIN_DIR/m2-spring-petclinic jacoco:report > "$HOBL_TRACE_OUT/coverage.log" 2>&1
+check_status "Creating JaCoCo report"
+cp target/site/jacoco/jacoco.xml "$HOBL_TRACE_OUT/" || exit 1
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" "$tools/TraceWindow.java" "$HOBL_TRACE_OUT" > "$HOBL_TRACE_OUT/analysis.log" 2>&1
+check_status "Analyzing Surefire JFR"
+while IFS= read -r line; do log "$line"; done < "$HOBL_TRACE_OUT/analysis.log"
+window_ms=unknown
+if [ -f "$HOBL_TRACE_OUT/window-ms.txt" ]; then
+    window_ms=$(cat "$HOBL_TRACE_OUT/window-ms.txt") || exit 1
+fi
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" "$tools/OuterSummary.java" "$HOBL_TRACE_OUT" > "$outer/summary.log" 2>&1
+summary_exit=$?
+while IFS= read -r line; do log "$line"; done < "$outer/summary.log"
+[ "$summary_exit" -eq 0 ]
+check_status "Analyzing Maven trace"
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" "$tools/RoundEvidence.java" "$HOBL_TRACE_OUT" > "$HOBL_TRACE_OUT/round-evidence.log" 2>&1
+evidence_exit=$?
+while IFS= read -r line; do log "$line"; done < "$HOBL_TRACE_OUT/round-evidence.log"
+[ "$evidence_exit" -eq 0 ]
+check_status "Collecting round evidence"
 
 # ============================================================================
 # Calculate scenario_runtime and save metrics
@@ -173,12 +237,16 @@ log "Spring Pet Clinic Metrics Summary"
 log "========================================"
 log "Build Phase: real=${build_real}s, user=${build_user}s, sys=${build_sys}s, cputime=${build_cputime}s"
 log "Test Phase:  real=${test_real}s, user=${test_user}s, sys=${test_sys}s, cputime=${test_cputime}s"
+log "Spring Starting to Tomcat initialized (traced): ${window_ms} ms"
 log "scenario_runtime (total real time): ${scenario_runtime}s"
 log "========================================"
 
 # Write metrics CSV file (key,value format)
 cat > "$METRICS_FILE" << EOF
 scenario_runtime,$scenario_runtime
+build_time,$build_real
+test_time,$test_real
+spring_starting_to_tomcat_ms,$window_ms
 build_real,$build_real
 build_user,$build_user
 build_sys,$build_sys

@@ -117,10 +117,20 @@ if (Test-Path $javaExe) {
 }
 
 "-- Cloning git repo" | log
-Set-Location "$scriptDrive\"
-git clone https://github.com/spring-projects/spring-petclinic.git
+$repo = "$scriptDrive\spring-petclinic"
+if (-not (Test-Path $repo)) {
+    git clone https://github.com/spring-projects/spring-petclinic.git $repo
+    check($LASTEXITCODE)
+}
 "-- Checking out a specific version of spring pet clinic to ensure consistent version" | log
-git checkout 6feeae0f13e0e258eedc99832416b42bb13779b1
+$revision = '500158f732419217507c7656904b8e6aa1bcc0d6'
+git -C $repo cat-file -e "$revision^{commit}" 2>$null
+if ($LASTEXITCODE) {
+    git -C $repo fetch origin $revision
+    check($LASTEXITCODE)
+}
+git -C $repo checkout --detach $revision
+check($LASTEXITCODE)
 
 "-- Setting up Maven local repository" | log
 if (Test-Path "$scriptDrive\temp\m2-spring-petclinic") {
@@ -137,7 +147,7 @@ Set-Location "$scriptDrive\spring-petclinic"
 check($LASTEXITCODE)
 
 "-- Verifying repo online" | log
-.\mvnw.cmd "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" clean verify
+.\mvnw.cmd "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" clean verify dependency:build-classpath "-Dmdep.outputFile=$PSScriptRoot\trace-classpath.txt"
 check($LASTEXITCODE)
 
 "-- spring_petclinic prep completed" | log

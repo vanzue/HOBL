@@ -129,9 +129,29 @@ Set-Location "$scriptDrive\spring-petclinic"
 "-- spring_petclinic clean started" | log
 $mavenCleanLog = "$scriptDrive\hobl_data\spring_petclinic_maven_clean_$($logSuffix.ToLower()).log"
 "-- Maven clean output: $mavenCleanLog" | log
-.\mvnw.cmd "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" clean *> $mavenCleanLog
+.\mvnw.cmd -o "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" clean *> $mavenCleanLog
 check($lastexitcode)
 "-- spring_petclinic clean completed" | log
+
+$tools = "$scriptDrive\hobl_bin\petclinic_trace"
+$env:HOBL_TRACE_OUT = (New-Item -ItemType Directory -Path "$scriptDrive\hobl_data\spring_startup_trace-$([guid]::NewGuid())" -ErrorAction Stop).FullName
+$env:HOBL_RUNNER_PID = "$PID"
+"Spring startup tracing enabled (Maven and Surefire): $env:HOBL_TRACE_OUT" | log
+$versionLog = Join-Path $env:HOBL_TRACE_OUT "maven-version.log"
+.\mvnw.cmd -o --version *> $versionLog
+check($LASTEXITCODE)
+& "$Env:JAVA_HOME\bin\java.exe" "$tools\PrepareOuter.java" $tools $versionLog
+check($LASTEXITCODE)
+$outer = Join-Path $env:HOBL_TRACE_OUT "outer"
+$wrapper = Join-Path $outer "mvnw.cmd"
+$ext = "-Dmaven.ext.class.path=$outer\probe.jar"
+
+function Save-CommandBoundary($phase, $startWall, $startTick, $endWall, $endTick, $duration, $code) {
+    @(
+        "runner_pid`tstart_utc`tstart_tick`tend_utc`tend_tick`tticks_per_second`tmeasured_ticks_100ns`texit_code"
+        "$PID`t$startWall`t$startTick`t$endWall`t$endTick`t$([Diagnostics.Stopwatch]::Frequency)`t$($duration.Ticks)`t$code"
+    ) | Set-Content -LiteralPath "$outer\$phase-command.tsv" -Encoding utf8 -ErrorAction Stop
+}
 
 # ============================================================================
 # Build phase (timed)
@@ -140,13 +160,21 @@ check($lastexitcode)
 Write-RunPhaseMarker "phase.run_prep.end"
 Write-RunPhaseMarker "phase.run_build.start"
 
-$mavenBuildLog = "$scriptDrive\hobl_data\spring_petclinic_maven_build_$($logSuffix.ToLower()).log"
+$mavenBuildLog = "$env:HOBL_TRACE_OUT\maven-package.log"
 "-- Maven build output: $mavenBuildLog" | log
 
+$env:HOBL_TRACE_PHASE = "package"
+$startWall = [DateTimeOffset]::UtcNow.ToString("o")
+$startTick = [Diagnostics.Stopwatch]::GetTimestamp()
 $buildDuration = Measure-Command {
-    .\mvnw.cmd -o "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" "-DskipTests" package *> $mavenBuildLog
+    & $wrapper -o $ext "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" "-DskipTests" package *> $mavenBuildLog
 }
-if ($LASTEXITCODE -ne 0) {
+$buildExit = $LASTEXITCODE
+$endTick = [Diagnostics.Stopwatch]::GetTimestamp()
+Save-CommandBoundary package $startWall $startTick ([DateTimeOffset]::UtcNow.ToString("o")) $endTick $buildDuration $buildExit
+Copy-Item -LiteralPath $mavenBuildLog -Destination "$scriptDrive\hobl_data\spring_petclinic_maven_build_$($logSuffix.ToLower()).log" -ErrorAction Stop
+Copy-Item -LiteralPath $mavenBuildLog -Destination "$env:HOBL_TRACE_OUT\maven-build.log" -ErrorAction Stop
+if ($buildExit -ne 0) {
     " ERROR - Offline build failed. See $mavenBuildLog for Maven output. Ensure prep completed online and populated $scriptDrive\temp\m2-spring-petclinic" | log
     Exit 1
 }
@@ -154,6 +182,8 @@ if ($LASTEXITCODE -ne 0) {
 $buildTime = [math]::Round($buildDuration.TotalSeconds, 2)
 "-- spring_petclinic build completed in ${buildTime}s" | log
 Write-RunPhaseMarker "phase.run_build.end"
+& "$Env:JAVA_HOME\bin\java.exe" "$tools\PrepareProbe.java" $tools "$PSScriptRoot\trace-classpath.txt"
+check($LASTEXITCODE)
 Write-RunPhaseMarker "phase.run_test.start"
 
 # ============================================================================
@@ -161,18 +191,50 @@ Write-RunPhaseMarker "phase.run_test.start"
 # ============================================================================
 "-- spring_petclinic test started" | log
 
-$mavenTestLog = "$scriptDrive\hobl_data\spring_petclinic_maven_test_$($logSuffix.ToLower()).log"
+$mavenTestLog = "$env:HOBL_TRACE_OUT\maven-test.log"
 "-- Maven test output: $mavenTestLog" | log
 
+$env:HOBL_TRACE_PHASE = "test"
+$startWall = [DateTimeOffset]::UtcNow.ToString("o")
+$startTick = [Diagnostics.Stopwatch]::GetTimestamp()
 $testDuration = Measure-Command {
-    .\mvnw.cmd -o "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" test *> $mavenTestLog
+    & $wrapper -o $ext "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" "-Dmaven.surefire.debug=-javaagent:target/hobl-agent.jar" "-Djunit.jupiter.extensions.autodetection.enabled=true" test *> $mavenTestLog
 }
-if ($LASTEXITCODE -ne 0) {
+$testExit = $LASTEXITCODE
+$endTick = [Diagnostics.Stopwatch]::GetTimestamp()
+Save-CommandBoundary test $startWall $startTick ([DateTimeOffset]::UtcNow.ToString("o")) $endTick $testDuration $testExit
+Write-RunPhaseMarker "phase.run_test.end"
+Copy-Item -LiteralPath $mavenTestLog -Destination "$scriptDrive\hobl_data\spring_petclinic_maven_test_$($logSuffix.ToLower()).log" -ErrorAction Stop
+if ($testExit -ne 0) {
     " ERROR - Offline test failed. See $mavenTestLog for Maven output. Ensure prep completed online and populated $scriptDrive\temp\m2-spring-petclinic" | log
     Exit 1
 }
-Write-RunPhaseMarker "phase.run_test.end"
 Write-RunPhaseMarker "phase.run_results.start"
+@(
+    "phase`tseconds"
+    "package`t$($buildDuration.TotalSeconds.ToString('R', [cultureinfo]::InvariantCulture))"
+    "test`t$($testDuration.TotalSeconds.ToString('R', [cultureinfo]::InvariantCulture))"
+) | Set-Content -LiteralPath "$env:HOBL_TRACE_OUT\phase-times.tsv" -Encoding utf8 -ErrorAction Stop
+"phase-times.tsv: unrounded Measure-Command wall seconds (scenario metrics retain two-decimal rounding)." | log
+Copy-Item target\jacoco.exec $env:HOBL_TRACE_OUT -ErrorAction Stop
+.\mvnw.cmd -o "-Dmaven.repo.local=$scriptDrive\temp\m2-spring-petclinic" jacoco:report *> "$env:HOBL_TRACE_OUT\coverage.log"
+check($LASTEXITCODE)
+Copy-Item target\site\jacoco\jacoco.xml $env:HOBL_TRACE_OUT -ErrorAction Stop
+& "$Env:JAVA_HOME\bin\java.exe" "$tools\TraceWindow.java" $env:HOBL_TRACE_OUT *> "$env:HOBL_TRACE_OUT\analysis.log"
+check($LASTEXITCODE)
+Get-Content -LiteralPath "$env:HOBL_TRACE_OUT\analysis.log" | log
+$windowMs = "unknown"
+if (Test-Path -LiteralPath "$env:HOBL_TRACE_OUT\window-ms.txt") {
+    $windowMs = Get-Content -LiteralPath "$env:HOBL_TRACE_OUT\window-ms.txt" -ErrorAction Stop
+}
+& "$Env:JAVA_HOME\bin\java.exe" "$tools\OuterSummary.java" $env:HOBL_TRACE_OUT *> "$outer\summary.log"
+$summaryExit = $LASTEXITCODE
+Get-Content -LiteralPath "$outer\summary.log" | log
+check($summaryExit)
+& "$Env:JAVA_HOME\bin\java.exe" "$tools\RoundEvidence.java" $env:HOBL_TRACE_OUT *> "$env:HOBL_TRACE_OUT\round-evidence.log"
+$evidenceExit = $LASTEXITCODE
+Get-Content -LiteralPath "$env:HOBL_TRACE_OUT\round-evidence.log" | log
+check($evidenceExit)
 
 $testTime = [math]::Round($testDuration.TotalSeconds, 2)
 "-- spring_petclinic test completed in ${testTime}s" | log
@@ -188,6 +250,7 @@ $scenarioRuntime = [math]::Round($buildTime + $testTime, 2)
 "========================================" | log
 "Build Time:       ${buildTime}s" | log
 "Test Time:        ${testTime}s" | log
+"Spring Starting to Tomcat initialized (traced): ${windowMs} ms" | log
 "Architecture:     $logSuffix" | log
 "Scenario Runtime: ${scenarioRuntime}s" | log
 "========================================" | log
@@ -200,6 +263,7 @@ $metricsContent = @(
     "build_time,$buildTime"
     "test_time,$testTime"
     "architecture,$logSuffix"
+    "spring_starting_to_tomcat_ms,$windowMs"
 )
 $metricsContent | Set-Content $resultsFile -Encoding UTF8
 "Metrics saved to: $resultsFile" | log

@@ -14,7 +14,7 @@ import time
 class MacSpringPetClinic(core.app_scenario.Scenario):
 
     module = __module__.split('.')[-1]
-    prep_version = "9"
+    prep_version = "10"
     resources = module + "_resources"
 
 
@@ -40,14 +40,20 @@ class MacSpringPetClinic(core.app_scenario.Scenario):
             # Copy over resources to DUT
             logging.info(f"Uploading test files to {self.target}")
             self._upload(f"scenarios\\MacOS\\{self.module}\\{self.resources}", self.dut_exec_path)
+            self._upload(os.path.join('scenarios', 'common', 'petclinic_trace'), self.dut_exec_path)
 
             # Excute prep script
             logging.info("Executing prep, this make take 10-15 minutes...")
             try:
-                self._call(["zsh", f"{self.target}/{self.module}_prep.sh"], fail_on_exception=False)
+                self._call(["zsh", f"{self.target}/{self.module}_prep.sh"])
             finally:
                 self._copy_data_from_remote(self.result_dir)
             self.createPrepStatusControlFile(self.prep_version)
+        else:
+            # Refresh only diagnostic code; keep the classpath and offline cache from prep.
+            self._upload(os.path.join('scenarios', 'macos', self.module, self.resources,
+                                      self.module + '_run.sh'), self.target, check_modified=False)
+            self._upload(os.path.join('scenarios', 'common', 'petclinic_trace'), self.dut_exec_path)
 
         # Call base class setUp() to dump config, call tool callbacks, and start measurment
         core.app_scenario.Scenario.setUp(self)
@@ -56,7 +62,7 @@ class MacSpringPetClinic(core.app_scenario.Scenario):
     def runTest(self):
         for i in range(int(self.loops)):
             logging.info(f"Running loop {i + 1}")
-            self._call(["zsh", f"{self.target}/{self.module}_run.sh"], fail_on_exception=False)
+            self._call(["zsh", f"{self.target}/{self.module}_run.sh"], timeout=3600)
 
 
     def tearDown(self):

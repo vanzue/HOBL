@@ -14,7 +14,7 @@ from datetime import datetime
 class SpringPetClinic(core.app_scenario.Scenario):
 
     module = __module__.split('.')[-1]
-    prep_version = "8"
+    prep_version = "9"
     resources = module + "_resources"
 
 
@@ -36,14 +36,20 @@ class SpringPetClinic(core.app_scenario.Scenario):
             # Copy over resources to DUT
             logging.info(f"Uploading test files to {self.target}")
             self._upload(f"scenarios\\windows\\{self.module}\\{self.resources}", self.dut_exec_path)
+            self._upload(os.path.join('scenarios', 'common', 'petclinic_trace'), self.dut_exec_path)
 
             # Excute prep script
             logging.info("Executing prep, this make take 10-15 minutes...")
             try:
-                self._call(["pwsh", f"{self.target}\\{self.module}_prep.ps1"], fail_on_exception=False, timeout=3600)
+                self._call(["pwsh", f"{self.target}\\{self.module}_prep.ps1"], timeout=3600)
             finally:
                 self._copy_data_from_remote(self.result_dir)
             self.createPrepStatusControlFile(self.prep_version)
+        else:
+            # Refresh only diagnostic code; keep the classpath and offline cache from prep.
+            self._upload(os.path.join('scenarios', 'windows', self.module, self.resources,
+                                      self.module + '_run.ps1'), self.target, check_modified=False)
+            self._upload(os.path.join('scenarios', 'common', 'petclinic_trace'), self.dut_exec_path)
 
         # Call base class setUp() to dump config, call tool callbacks, and start measurment
         core.app_scenario.Scenario.setUp(self)
@@ -53,7 +59,8 @@ class SpringPetClinic(core.app_scenario.Scenario):
         start_time = datetime.now().astimezone().isoformat()
         for i in range(int(self.loops)):
             logging.info(f"Running loop {i + 1}")
-            self._call(["pwsh", f"{self.target}\\{self.module}_run.ps1 -startTime {start_time}"], fail_on_exception=False)
+            args = f"{self.target}\\{self.module}_run.ps1 -startTime {start_time}"
+            self._call(["pwsh", args], timeout=3600)
 
 
     def tearDown(self):
