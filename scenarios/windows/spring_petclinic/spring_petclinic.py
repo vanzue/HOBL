@@ -41,7 +41,8 @@ class SpringPetClinic(core.app_scenario.Scenario):
             # Excute prep script
             logging.info("Executing prep, this make take 10-15 minutes...")
             try:
-                self._call(["pwsh", f"{self.target}\\{self.module}_prep.ps1"], timeout=3600)
+                # Passing PetClinic tests deliberately print Java exception traces.
+                self._call(["pwsh", f"{self.target}\\{self.module}_prep.ps1"], fail_on_exception=False, timeout=3600)
             finally:
                 self._copy_data_from_remote(self.result_dir)
             self.createPrepStatusControlFile(self.prep_version)
@@ -60,7 +61,7 @@ class SpringPetClinic(core.app_scenario.Scenario):
         for i in range(int(self.loops)):
             logging.info(f"Running loop {i + 1}")
             args = f"{self.target}\\{self.module}_run.ps1 -startTime {start_time}"
-            self._call(["pwsh", args], timeout=3600)
+            self._call(["pwsh", args], fail_on_exception=False, timeout=3600)
 
 
     def tearDown(self):
